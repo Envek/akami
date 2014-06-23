@@ -52,4 +52,16 @@ describe Akami::WSSE::VerifySignature do
     expect(validator.verify!).to equal(true)
   end
 
+  it 'should validate correctly signed XML messages with inclusive namespaces' do
+    xml = fixture('akami/wsse/verify_signature/valid_inclusive_namespaces.xml')
+    validator = described_class.new(xml)
+    expect(validator.verify!).to equal(true)
+  end
+
+  it 'should validate correctly signed XML messages with unicode characters and entities' do
+    xml = fixture('akami/wsse/verify_signature/valid_unicode_and_entities.xml')
+    validator = described_class.new(xml)
+    expect(validator.verify!).to equal(true)
+  end
+
 end

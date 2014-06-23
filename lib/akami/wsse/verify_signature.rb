@@ -69,12 +69,14 @@ module Akami
           digest_algorithm = ref.at_xpath('//ds:DigestMethod', namespaces)['Algorithm']
           element_id = ref.attributes['URI'].value[1..-1] # strip leading '#'
           element = document.at_xpath(%(//*[@wsu:Id="#{element_id}"]), namespaces)
-          unless supplied_digest(element) == generate_digest(element, digest_algorithm)
+          canonicalized_element = apply_transformations(element, ref)
+          generated_digest = generate_digest(canonicalized_element, digest_algorithm)
+          unless supplied_digest(element) == generated_digest
             raise InvalidDigest, "Invalid Digest for #{element_id}"
           end
         end
 
-        data = canonicalize(signed_info)
+        data = canonicalized_signed_info
         signature = Base64.decode64(signature_value)
         signature_algorithm = document.at_xpath('//wse:Security/ds:Signature/ds:SignedInfo/ds:SignatureMethod', namespaces)['Algorithm']
         signature_digester = digester_for_signature_method(signature_algorithm)
@@ -86,10 +88,28 @@ module Akami
         document.at_xpath('//wse:Security/ds:Signature/ds:SignedInfo', namespaces)
       end
 
-      # Generate digest for a given +element+ (or its XPath) with a given +algorithm+
+      # Canonicalize +<SignedInfo>+ node, as described in +<CanonicalizationMethod>+ node
+      def canonicalized_signed_info
+        signed_info_node = signed_info
+        c14n_method_node = signed_info_node.at_xpath('ds:CanonicalizationMethod', namespaces)
+        algorithm = c14n_method_node['Algorithm'].to_s
+        case
+          when algorithm.start_with?('http://www.w3.org/2001/10/xml-exc-c14n#')
+            c14n_algorithm = Nokogiri::XML::XML_C14N_EXCLUSIVE_1_0
+            inc_ns_node = c14n_method_node.at_xpath('ec:InclusiveNamespaces', {ec: algorithm})
+            inclusive_namespaces = inc_ns_node ? inc_ns_node['PrefixList'].to_s.squeeze(' ').split(' ') : nil
+            with_comments = algorithm.end_with?('WithComments') ? true : nil
+            canonicalize(signed_info_node, c14n_algorithm, inclusive_namespaces, with_comments)
+          else
+            raise InvalidSignedValue, "Not supported canonicalization method: #{algorithm}"
+        end
+      end
+
+      # Generate digest for a given +element+ with a given +algorithm+
       def generate_digest(element, algorithm)
-        element = document.at_xpath(element, namespaces) if element.is_a? String
-        xml = canonicalize(element)
+        save_options = Nokogiri::XML::Node::SaveOptions
+        save_as_canonicalized = save_options::AS_XML | save_options::NO_DECLARATION | save_options::NO_EMPTY_TAGS
+        xml = element.to_xml(save_with: save_as_canonicalized).strip
         digest(xml, algorithm).strip
       end
 
@@ -110,6 +130,26 @@ module Akami
       # Calculate digest for string with given algorithm URL and Base64 encodes it.
       def digest(string, algorithm)
         Base64.encode64 digester(algorithm).digest(string)
+      end
+
+      def apply_transformations(element, ref)
+        result = nil
+        ref.xpath('ds:Transforms/ds:Transform', namespaces).each_with_index do |transform, idx|
+          algorithm = transform['Algorithm'].to_s
+          case
+            when algorithm.start_with?('http://www.w3.org/2001/10/xml-exc-c14n#')
+              c14n_algorithm = Nokogiri::XML::XML_C14N_EXCLUSIVE_1_0
+              inc_ns_node = transform.at_xpath('ec:InclusiveNamespaces', {ec: algorithm})
+              inclusive_namespaces = inc_ns_node ? inc_ns_node['PrefixList'].to_s.squeeze(' ').split(' ') : nil
+              with_comments = algorithm.end_with?('WithComments') ? true : nil
+              canonicalized = canonicalize(element, c14n_algorithm, inclusive_namespaces, with_comments)
+              # Encoding is required to avoid conversion of non-ASCII symbols to entities on XML reparsing
+              result = Nokogiri::XML(canonicalized, nil, document.encoding || 'UTF-8')
+            else
+              raise InvalidDigest, "Not supported transformation: #{algorithm}"
+          end
+        end
+        result
       end
 
       # Returns digester for calculating digest for signature verification
